@@ -1,5 +1,9 @@
 #include "FrameGetter.hh"
 
+#include <fstream>
+#include <iostream>
+#include <opencv2/opencv.hpp>
+
 namespace kf
 {
 FileFrameGetter::FileFrameGetter(const std::string &rgb_list_path, const std::string &depth_list_path)

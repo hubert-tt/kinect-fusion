@@ -1,5 +1,6 @@
 set(SOURCES
-    FrameGetter.cpp
+    FileFrameGetter.cpp
+    KinectFrameGetter.cpp
 )
 
 add_library(FrameGetter ${SOURCES})
