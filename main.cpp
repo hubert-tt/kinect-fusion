@@ -12,167 +12,25 @@
 #include <GL/glut.h>
 #endif
 
+#include <eigen3/Eigen/Eigen>
 #include <libfreenect/libfreenect.hpp>
 #include <omp.h>
 #include <opencv2/opencv.hpp>
 
+#include "FrameGetter.hh"
+
+volatile int checksum = 0;
+
 namespace kf // Kinect Fusion abbreviation
 {
 
-class FrameGetter
-{
-  public:
-    virtual ~FrameGetter() = default;
+constexpr short max_short = std::numeric_limits<short>::max();
+constexpr short min_short = std::numeric_limits<short>::min();
+constexpr float normalize_short = 1.0f / max_short;
 
-    virtual bool get_rgb(std::vector<uint8_t> &buffer) = 0;
-    virtual bool get_depth(std::vector<uint16_t> &buffer) = 0;
-};
-
-class FileFrameGetter : public FrameGetter
-{
-  public:
-    FileFrameGetter(const std::string &file_path)
-    {
-        // Open the file to load the data
-        std::ifstream infile(file_path);
-        if (!infile.is_open())
-        {
-            std::cerr << "Error opening file: " << file_path << std::endl;
-            return;
-        }
-
-        // Read the entire content into a string
-        std::stringstream buffer;
-        buffer << infile.rdbuf();
-        std::string content = buffer.str();
-
-        // Extract rgb data (after "rgb = { ... }")
-        size_t rgb_pos = content.find("rgb = { ");
-        size_t depth_pos = content.find("depth = { ");
-
-        if (rgb_pos != std::string::npos && depth_pos != std::string::npos)
-        {
-            rgb_pos += 8;   // Move past "rgb = { "
-            depth_pos += 9; // Move past "depth = { "
-
-            // Extract the rgb data between the braces
-            size_t rgb_end = content.find(" }", rgb_pos);
-            std::string rgb_data = content.substr(rgb_pos, rgb_end - rgb_pos);
-
-            // Extract the depth data between the braces
-            size_t depth_end = content.find(" }", depth_pos);
-            std::string depth_data = content.substr(depth_pos, depth_end - depth_pos);
-
-            // Parse the numbers from the rgb and depth strings
-            parse_data(rgb_data, rgb);
-            parse_data(depth_data, depth);
-        }
-
-        infile.close();
-    }
-
-    bool get_rgb(std::vector<uint8_t> &buffer) override
-    {
-        if (rgb.empty())
-            return false;
-        buffer = rgb;
-        return true;
-    }
-
-    bool get_depth(std::vector<uint16_t> &buffer) override
-    {
-        if (depth.empty())
-            return false;
-        buffer = depth;
-        return true;
-    }
-
-  private:
-    // Utility function to parse the data from the string
-    template <typename T> void parse_data(const std::string &data, std::vector<T> &buffer)
-    {
-        std::stringstream ss(data);
-        int value;
-        while (ss >> value)
-        {
-            buffer.push_back(static_cast<T>(value));
-            if (ss.peek() == ',')
-            {
-                ss.ignore(); // Skip the comma
-            }
-        }
-    }
-
-    std::vector<uint8_t> rgb;
-    std::vector<uint16_t> depth;
-};
-
-class KinectFrameGetter : public FrameGetter, public Freenect::FreenectDevice
-{
-  public:
-    KinectFrameGetter(freenect_context *_ctx, int _index)
-        : Freenect::FreenectDevice(_ctx, _index),
-          buffer_video(freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_VIDEO_RGB).bytes),
-          buffer_depth(freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_REGISTERED).bytes / 2),
-          new_rgb_frame(false), new_depth_frame(false)
-    {
-        setDepthFormat(FREENECT_DEPTH_REGISTERED);
-    }
-
-    // Do not call directly, even in child
-    void VideoCallback(void *_rgb, uint32_t timestamp) override
-    {
-        std::lock_guard<std::mutex> lock(rgb_mutex);
-
-        uint8_t *rgb = static_cast<uint8_t *>(_rgb);
-        copy(rgb, rgb + getVideoBufferSize(), buffer_video.begin());
-        new_rgb_frame = true;
-    }
-
-    // Do not call directly, even in child
-    void DepthCallback(void *_depth, uint32_t timestamp) override
-    {
-        std::lock_guard<std::mutex> lock(depth_mutex);
-
-        uint16_t *depth = static_cast<uint16_t *>(_depth);
-        copy(depth, depth + getDepthBufferSize() / 2, buffer_depth.begin());
-        new_depth_frame = true;
-    }
-
-    bool get_rgb(std::vector<uint8_t> &buffer) override
-    {
-        std::lock_guard<std::mutex> lock(rgb_mutex);
-
-        if (!new_rgb_frame)
-            return false;
-
-        buffer.swap(buffer_video);
-        new_rgb_frame = false;
-
-        return true;
-    }
-
-    bool get_depth(std::vector<uint16_t> &buffer) override
-    {
-        std::lock_guard<std::mutex> lock(depth_mutex);
-
-        if (!new_depth_frame)
-            return false;
-
-        buffer.swap(buffer_depth);
-        new_depth_frame = false;
-
-        return true;
-    }
-
-  private:
-    std::mutex rgb_mutex;
-    std::mutex depth_mutex;
-    std::vector<uint8_t> buffer_video;
-    std::vector<uint16_t> buffer_depth;
-    bool new_rgb_frame;
-    bool new_depth_frame;
-};
+constexpr int voxel_grid_size = 256;
+constexpr float voxel_size = 8.0f;
+constexpr float truncation_distance = voxel_size * 5;
 
 struct FrameData
 {
@@ -340,9 +198,105 @@ void surface_measurement(FrameData &frame_data, const std::vector<uint16_t> &dep
     }
 }
 
+void surface_reconstruction(VolumeData &volume, const std::vector<uint16_t> &depth, const std::vector<uint8_t> &color,
+                            const size_t max_width, const size_t max_height, const CameraIntrinsics &camera,
+                            const float truncation_distance, const Eigen::Matrix4f &model_view)
+{
+    // Extract rotation and translation from the model view matrix
+    Eigen::Matrix3f rotation = model_view.block<3, 3>(0, 0);
+    Eigen::Vector3f translation = model_view.block<3, 1>(0, 3);
+
+    const int volume_width = volume.volume_size[0];
+    const int volume_height = volume.volume_size[1];
+    const int volume_depth = volume.volume_size[2];
+    const float voxel_scale = volume.voxel_scale;
+    const int max_weight = 128;
+
+    // Iterate over the 3D voxel grid
+#pragma omp parallel for collapse(2)
+    for (int yz = 0; yz < volume_height * volume_depth; ++yz)
+    {
+        for (int x = 0; x < volume_width; ++x)
+        {
+            int y = yz / volume_depth; // Decompose yz into y and z
+            int z = yz % volume_depth;
+            // Compute voxel position in world coordinates
+            Eigen::Vector3f position((x + 0.5f) * voxel_scale, (y + 0.5f) * voxel_scale, (z + 0.5f) * voxel_scale);
+
+            // Transform to camera coordinates
+            Eigen::Vector3f camera_pos = rotation * position + translation;
+
+            if (camera_pos.z() <= 0)
+            {
+                continue; // Skip voxels behind the camera
+            }
+
+            // Project to 2D image plane
+            int u = static_cast<int>(std::round(camera_pos.x() / camera_pos.z() * camera.f + camera.cx));
+            int v = static_cast<int>(std::round(camera_pos.y() / camera_pos.z() * camera.f + camera.cy));
+
+            // Check if the projection falls within the image bounds
+            if (u < 0 || u >= static_cast<int>(max_width) || v < 0 || v >= static_cast<int>(max_height))
+            {
+                continue;
+            }
+
+            // Retrieve the depth value from the depth image
+            float d = static_cast<float>(depth[v * max_width + u]); // mm
+            if (d <= 0)
+            {
+                continue;
+            }
+
+            // Compute SDF
+            float sdf = d - camera_pos.norm();
+
+            if (sdf >= -truncation_distance)
+            {
+                float new_tsdf = std::min(1.0f, sdf / truncation_distance);
+#pragma omp critical
+                {
+                    // Retrieve the current TSDF value and weight
+                    auto &voxel = volume.tsdf_volume.at<cv::Vec2s>(z * volume_height + y, x);
+                    float current_tsdf = voxel[0] * normalize_short; // voxel[0] is short
+                    int current_weight = voxel[1];
+
+                    // Update TSDF using weighted average
+                    const int add_weight = 1;
+                    const float weight_inv = 1.0f / (current_weight + add_weight);
+                    float updated_tsdf = (current_weight * current_tsdf + add_weight * new_tsdf) * weight_inv;
+                    int new_weight = std::min(current_weight + add_weight, max_weight);
+                    short new_value = std::clamp(static_cast<short>(updated_tsdf * max_short), min_short, max_short);
+
+                    voxel[0] = static_cast<short>(new_value);
+                    voxel[1] = static_cast<short>(new_weight);
+
+                    checksum += voxel[0];
+                    checksum += voxel[1];
+
+                    // Update color if within a valid SDF range
+                    if (sdf <= truncation_distance / 2 && sdf >= -truncation_distance / 2)
+                    {
+                        auto &model_color = volume.color_volume.at<cv::Vec3b>(z * volume_height + y, x);
+
+                        const int color_index = (v * max_width + u) * 3;
+
+                        model_color[0] = static_cast<uint8_t>(
+                            (current_weight * model_color[0] + add_weight * color[color_index]) * weight_inv);
+                        model_color[1] = static_cast<uint8_t>(
+                            (current_weight * model_color[1] + add_weight * color[color_index + 1]) * weight_inv);
+                        model_color[2] = static_cast<uint8_t>(
+                            (current_weight * model_color[2] + add_weight * color[color_index + 2]) * weight_inv);
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace kf
 
-// #define USE_FILE
+#define USE_FILE
 
 #ifndef USE_FILE
 Freenect::Freenect freenect;
@@ -358,6 +312,8 @@ float zoom = 1;               // Zoom factor
 bool color = true;            // Flag to indicate to use of color in the cloud
 uint8_t print_counter = 0;
 
+Eigen::Matrix4f current_pose;
+
 void DrawGLScene()
 {
     static std::vector<uint8_t> rgb(640 * 480 * 3);
@@ -365,12 +321,25 @@ void DrawGLScene()
     static std::vector<uint16_t> smooth_depth(640 * 480);
     static kf::FrameData frame_data(640, 480);
     static kf::CameraIntrinsics camera = {.f = 595.f, .cx = (640 - 1) / 2.f, .cy = (480 - 1) / 2.f};
+    static kf::VolumeData volume(cv::Vec3i({kf::voxel_grid_size, kf::voxel_grid_size, kf::voxel_grid_size}),
+                                 kf::voxel_size); // 512^3 scene with 2.0mm per voxel
 
-    if (device->get_depth(depth) == true && device->get_rgb(rgb) == true)
+    if (device->get_rgb(rgb) == true && device->get_depth(depth) == true)
     {
-        kf::surface_measurement(frame_data, depth, rgb, camera, 2500);
+        kf::surface_measurement(frame_data, depth, rgb, camera, 5500);
+        auto start_parallel = std::chrono::high_resolution_clock::now();
+        kf::surface_reconstruction(volume, frame_data.depth_levels[0], frame_data.color_levels[0], frame_data.max_width,
+                                   frame_data.max_height, camera, kf::truncation_distance, current_pose);
+        auto &voxel = volume.tsdf_volume.at<cv::Vec2s>(100, 100);
+        std::cout << voxel[0] << " " << voxel[1] << std::endl;
+        auto end_parallel = std::chrono::high_resolution_clock::now();
 
-#ifndef USE_FILE
+        double time_parallel =
+            std::chrono::duration_cast<std::chrono::milliseconds>(end_parallel - start_parallel).count();
+        std::cout << "OpenMP-parallelized version time: " << time_parallel << " ms" << std::endl;
+
+        std::cout << "Checksum: " << checksum << std::endl;
+
         if (print_counter < 55) // do it for few first frames as first tend to be broken (RGB)
         {
             print_counter++;
@@ -410,6 +379,9 @@ void DrawGLScene()
             // Close the file
             outfile.close();
         }
+
+#ifdef USE_FILE
+        device->next_frame();
 #endif
     }
 
@@ -545,13 +517,20 @@ void printInfo()
 
 int main(int argc, char **argv)
 {
+
+    current_pose.setIdentity();
+    current_pose(0, 3) = 512 / 2 * 2.0f;
+    current_pose(1, 3) = 512 / 2 * 2.0f;
+    current_pose(2, 3) = 512 / 2 * 2.0f - 200.0f;
+
 #ifndef USE_FILE
     device = &freenect.createDevice<kf::KinectFrameGetter>(0);
     device->setDepthFormat(FREENECT_DEPTH_REGISTERED);
     device->startVideo();
     device->startDepth();
 #else
-    device = new kf::FileFrameGetter("output.txt");
+    device = new kf::FileFrameGetter("../data/rgbd_dataset_freiburg1_xyz/rgb.txt",
+                                     "../data/rgbd_dataset_freiburg1_xyz/depth.txt");
 #endif
 
     glutInit(&argc, argv);
