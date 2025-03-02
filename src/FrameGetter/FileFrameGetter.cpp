@@ -73,6 +73,7 @@ bool FileFrameGetter::next_frame()
 {
     if (current_index + 1 < rgb_files.size() && current_index + 1 < depth_files.size())
     {
+        std::cout << "F: " + depth_files[current_index] << " " + rgb_files[current_index] << std::endl;
         ++current_index;
         return true;
     }

@@ -18,7 +18,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang
         -Wno-unused-parameter
         -O3
         # -pedantic-errors
-        # -ggdb
+        -ggdb
     )
 endif()
 

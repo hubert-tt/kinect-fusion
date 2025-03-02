@@ -13,12 +13,12 @@ constexpr short min_short = std::numeric_limits<short>::min();
 constexpr float normalize_short = 1.0f / max_short;
 
 constexpr int voxel_grid_size = 256;
-constexpr float voxel_size = 8.0f;
-constexpr float truncation_distance = voxel_size * 5;
+constexpr float voxel_size = 4.0f;
+constexpr float truncation_distance = voxel_size * 10;
+static constexpr size_t levels = 3;
 
 struct FrameData
 {
-    static constexpr size_t levels = 3;
 
     size_t max_width;
     size_t max_height;
@@ -72,6 +72,50 @@ struct FrameData
         return *this;
     }
 };
+
+// struct ModelData
+// {
+
+//     size_t max_width;
+//     size_t max_height;
+
+//     std::array<cv::Mat, levels> vertex_levels;
+//     std::array<cv::Mat, levels> normal_levels;
+//     std::array<cv::Mat, levels> color_levels;
+
+//     explicit ModelData(size_t width, size_t height) : max_width(width), max_height(height)
+//     {
+//         for (size_t i = 0; i < levels; ++i)
+//         {
+//             // Divide by 2^i for each level
+//             size_t current_width = width / (1 << i);
+//             size_t current_height = height / (1 << i);
+
+//             // Preallocate vertex and normal matrices for each level
+//             vertex_levels[i] = cv::Mat(current_height, current_width, CV_32FC3); // 3 channels for vertex (x, y, z)
+//             normal_levels[i] = cv::Mat(current_height, current_width, CV_32FC3); // 3 channels for normal (nx, ny,
+//             nz) color_levels[i] = cv::Mat(current_height, current_width, CV_8UC3);
+//         }
+//     }
+
+//     // Copy mechanisms disabled as it is too costly with such a big volumes of data
+//     ModelData(const ModelData &) = delete;
+//     ModelData &operator=(const ModelData &other) = delete;
+
+//     ModelData(ModelData &&data) noexcept
+//         : color_levels(std::move(data.color_levels)), vertex_levels(std::move(data.vertex_levels)),
+//           normal_levels(std::move(data.normal_levels))
+//     {
+//     }
+
+//     ModelData &operator=(ModelData &&data) noexcept
+//     {
+//         color_levels = std::move(data.color_levels);
+//         vertex_levels = std::move(data.vertex_levels);
+//         normal_levels = std::move(data.normal_levels);
+//         return *this;
+//     }
+// };
 
 struct CameraIntrinsics
 {

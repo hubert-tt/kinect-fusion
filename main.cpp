@@ -36,19 +36,19 @@ void surface_measurement(FrameData &frame_data, const std::vector<uint16_t> &dep
     std::memcpy(frame_data.color_levels[0].data(), color.data(), color.size() * sizeof(uint8_t));
 
     // Create other levels of pyramid
-    for (size_t level = 1; level < frame_data.levels; ++level)
+    for (size_t level = 1; level < kf::levels; ++level)
     {
         cv::pyrDown(frame_data.depth_levels[level - 1], frame_data.depth_levels[level]);
     }
 
     // Filter the levels (used medianBlur instead of bilateralFilter as it can work in place and support u16)
 #pragma omp parallel for
-    for (size_t level = 0; level < frame_data.levels; ++level)
+    for (size_t level = 0; level < kf::levels; ++level)
     {
         cv::medianBlur(frame_data.depth_levels[level], frame_data.smoothed_depth_levels[level], 5);
     }
 
-    for (size_t level = 0; level < frame_data.levels; ++level)
+    for (size_t level = 0; level < kf::levels; ++level)
     {
 #pragma omp parallel for collapse(2) // Parallelize rows and columns
         for (size_t y = 0; y < height / (1 << level); ++y)
@@ -205,9 +205,132 @@ void surface_reconstruction(VolumeData &volume, const std::vector<uint16_t> &dep
     }
 }
 
+// using Vec3fda = Eigen::Matrix<float, 3, 1, Eigen::DontAlign>;
+
+// inline float interpolate_trilinearly(const Vec3fda &point, const VolumeData &volume)
+// {
+//     Eigen::Vector3i grid_point = point.cast<int>();
+
+//     float a = point.x() - grid_point.x();
+//     float b = point.y() - grid_point.y();
+//     float c = point.z() - grid_point.z();
+
+//     auto get_tsdf = [&](int x, int y, int z) -> float {
+//         return static_cast<float>(volume.tsdf_volume.at<short>(z, y * volume.volume_size.x() + x)) * normalize_short;
+//     };
+
+//     float tsdf = 0.0f;
+//     for (int dz = 0; dz <= 1; ++dz)
+//     {
+//         for (int dy = 0; dy <= 1; ++dy)
+//         {
+//             for (int dx = 0; dx <= 1; ++dx)
+//             {
+//                 float weight = ((dx == 0) ? (1 - a) : a) * ((dy == 0) ? (1 - b) : b) * ((dz == 0) ? (1 - c) : c);
+//                 tsdf += get_tsdf(grid_point.x() + dx, grid_point.y() + dy, grid_point.z() + dz) * weight;
+//             }
+//         }
+//     }
+
+//     return tsdf;
+// }
+
+// inline float get_min_time(const Eigen::Vector3f &volume_max, const Vec3fda &origin, const Vec3fda &direction)
+// {
+//     float txmin = ((direction.x() > 0 ? 0.f : volume_max.x()) - origin.x()) / direction.x();
+//     float tymin = ((direction.y() > 0 ? 0.f : volume_max.y()) - origin.y()) / direction.y();
+//     float tzmin = ((direction.z() > 0 ? 0.f : volume_max.z()) - origin.z()) / direction.z();
+
+//     return std::max({txmin, tymin, tzmin});
+// }
+
+// inline float get_max_time(const Eigen::Vector3f &volume_max, const Vec3fda &origin, const Vec3fda &direction)
+// {
+//     float txmax = ((direction.x() > 0 ? volume_max.x() : 0.f) - origin.x()) / direction.x();
+//     float tymax = ((direction.y() > 0 ? volume_max.y() : 0.f) - origin.y()) / direction.y();
+//     float tzmax = ((direction.z() > 0 ? volume_max.z() : 0.f) - origin.z()) / direction.z();
+
+//     return std::min({txmax, tymax, tzmax});
+// }
+
+// void surface_prediction(const VolumeData &volume, cv::Mat &model_vertex, cv::Mat &model_normal, cv::Mat &model_color,
+//                         const CameraIntrinsics &camera, const Eigen::Matrix4f &pose, float truncation_distance)
+// {
+//     int rows = model_vertex.rows;
+//     int cols = model_vertex.cols;
+
+//     Eigen::Vector3f volume_max(volume.volume_size[0] * volume.voxel_scale, volume.volume_size[1] *
+//     volume.voxel_scale,
+//                                volume.volume_size[2] * volume.voxel_scale);
+
+// #pragma omp parallel for collapse(2)
+//     for (int y = 0; y < rows; ++y)
+//     {
+//         for (int x = 0; x < cols; ++x)
+//         {
+//             Vec3fda pixel_position((x - camera.cx) / camera.f, (y - camera.cy) / camera.f, 1.0f);
+
+//             Vec3fda ray_direction = rotation * pixel_position;
+//             ray_direction.normalize();
+
+//             float ray_length = std::max(get_min_time(volume_max, translation, ray_direction), 0.0f);
+//             if (ray_length >= get_max_time(volume_max, translation, ray_direction))
+//             {
+//                 continue;
+//             }
+
+//             ray_length += volume.voxel_scale;
+//             Vec3fda grid = (translation + ray_direction * ray_length) / volume.voxel_scale;
+
+//             while (ray_length < volume_max.norm())
+//             {
+//                 grid = (translation + ray_direction * ray_length) / volume.voxel_scale;
+
+//                 if (grid.x() < 1 || grid.x() >= volume.volume_size.x() - 1 || grid.y() < 1 ||
+//                     grid.y() >= volume.volume_size.y() - 1 || grid.z() < 1 || grid.z() >= volume.volume_size.z() - 1)
+//                 {
+//                     break;
+//                 }
+
+//                 float tsdf = interpolate_trilinearly(grid, volume);
+//                 if (std::abs(tsdf) < 0.01f)
+//                 {
+//                     model_vertex.at<cv::Vec3f>(y, x) = cv::Vec3f(translation.x() + ray_direction.x() * ray_length,
+//                                                                  translation.y() + ray_direction.y() * ray_length,
+//                                                                  translation.z() + ray_direction.z() * ray_length);
+
+//                     // Compute normal and save to model_normal
+//                     Vec3fda normal;
+//                     for (int axis = 0; axis < 3; ++axis)
+//                     {
+//                         Vec3fda offset = grid;
+//                         offset[axis] += 1.0f;
+//                         float tsdf1 = interpolate_trilinearly(offset, volume);
+
+//                         offset[axis] -= 2.0f;
+//                         float tsdf2 = interpolate_trilinearly(offset, volume);
+
+//                         normal[axis] = (tsdf1 - tsdf2);
+//                     }
+
+//                     if (normal.norm() > 0.0f)
+//                     {
+//                         normal.normalize();
+//                         model_normal.at<cv::Vec3f>(y, x) = cv::Vec3f(normal.x(), normal.y(), normal.z());
+//                     }
+
+//                     break;
+//                 }
+
+//                 ray_length += truncation_distance * 0.5f;
+//             }
+//         }
+//     }
+// }
+
 } // namespace kf
 
-#define USE_FILE
+// #define USE_FILE
 
 #ifndef USE_FILE
 Freenect::Freenect freenect;
@@ -221,26 +344,96 @@ int mx = -1, my = -1;         // Prevous mouse coordinates
 float anglex = 0, angley = 0; // Panning angles
 float zoom = 1;               // Zoom factor
 bool color = true;            // Flag to indicate to use of color in the cloud
-uint8_t print_counter = 0;
+// uint8_t print_counter = 0;
 
 Eigen::Matrix4f current_pose;
+
+void SavePointCloudToPLY(const cv::Mat &tsdf_volume, const cv::Mat &color_volume, const cv::Vec3i &volume_size,
+                         float voxel_scale, const std::string &filename)
+{
+    // Open the output file
+    std::ofstream file_out(filename);
+    if (!file_out.is_open())
+    {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        return;
+    }
+
+    // Write the PLY header
+    file_out << "ply" << std::endl;
+    file_out << "format ascii 1.0" << std::endl;
+    file_out << "element vertex " << volume_size[0] * volume_size[1] * volume_size[2] << std::endl;
+    file_out << "property float x" << std::endl;
+    file_out << "property float y" << std::endl;
+    file_out << "property float z" << std::endl;
+    file_out << "property float nx" << std::endl;
+    file_out << "property float ny" << std::endl;
+    file_out << "property float nz" << std::endl;
+    file_out << "property uchar red" << std::endl;
+    file_out << "property uchar green" << std::endl;
+    file_out << "property uchar blue" << std::endl;
+    file_out << "end_header" << std::endl;
+
+    // Iterate over the volume, considering the flattened layout
+    for (int yz = 0; yz < volume_size[1] * volume_size[2]; ++yz)
+    {
+        for (int x = 0; x < volume_size[0]; ++x)
+        {
+            int y = yz / volume_size[2]; // calculate y index
+            int z = yz % volume_size[2]; // calculate z index
+
+            // Get the TSDF value at voxel (x, y, z)
+            auto &voxel = tsdf_volume.at<cv::Vec2s>(z * volume_size[1] + y, x); // Flattened index
+            float tsdf_value = voxel[0] / 1000.0f; // Scaling TSDF value (assuming it's in mm)
+
+            // If the TSDF value is close to zero, treat it as a surface voxel
+            if (std::fabs(tsdf_value) < voxel_scale)
+            {
+                // Convert voxel (x, y, z) to world coordinates
+                float world_x = x * voxel_scale;
+                float world_y = y * voxel_scale;
+                float world_z = z * voxel_scale;
+
+                // Get the color for the current voxel from the color volume
+                cv::Vec3b color = color_volume.at<cv::Vec3b>(z * volume_size[1] + y, x);
+
+                // Dummy normals (you can compute them if needed, this is just an example)
+                float nx = 0.0f, ny = 0.0f, nz = 1.0f;
+
+                // Write the point (position, normal, color) to the PLY file
+                file_out << world_x << " " << world_y << " " << world_z << " ";
+                file_out << nx << " " << ny << " " << nz << " ";
+                file_out << static_cast<int>(color[2]) << " "        // Red
+                         << static_cast<int>(color[1]) << " "        // Green
+                         << static_cast<int>(color[0]) << std::endl; // Blue
+            }
+        }
+    }
+
+    std::cout << "Point cloud saved to: " << filename << std::endl;
+}
 
 void DrawGLScene()
 {
     static std::vector<uint8_t> rgb(640 * 480 * 3);
     static std::vector<uint16_t> depth(640 * 480);
     static std::vector<uint16_t> smooth_depth(640 * 480);
-    static kf::FrameData frame_data(640, 480);
+    static kf::FrameData previous_frame_data(640, 480);
+    static kf::FrameData current_frame_data(640, 480);
+    static size_t frame_counter = 0;
     static kf::CameraIntrinsics camera = {.f = 595.f, .cx = (640 - 1) / 2.f, .cy = (480 - 1) / 2.f};
     static kf::VolumeData volume(cv::Vec3i({kf::voxel_grid_size, kf::voxel_grid_size, kf::voxel_grid_size}),
-                                 kf::voxel_size); // 512^3 scene with 2.0mm per voxel
+                                 kf::voxel_size);
+    bool stop = false;
 
-    if (device->get_rgb(rgb) == true && device->get_depth(depth) == true)
+    if ((device->get_rgb(rgb) == true && device->get_depth(depth) == true) || stop == true)
     {
-        kf::surface_measurement(frame_data, depth, rgb, camera, 5500);
+        kf::surface_measurement(current_frame_data, depth, rgb, camera, 5500);
+
         auto start_parallel = std::chrono::high_resolution_clock::now();
-        kf::surface_reconstruction(volume, frame_data.depth_levels[0], frame_data.color_levels[0], frame_data.max_width,
-                                   frame_data.max_height, camera, kf::truncation_distance, current_pose);
+        kf::surface_reconstruction(volume, current_frame_data.depth_levels[0], current_frame_data.color_levels[0],
+                                   current_frame_data.max_width, current_frame_data.max_height, camera,
+                                   kf::truncation_distance, current_pose);
         auto &voxel = volume.tsdf_volume.at<cv::Vec2s>(100, 100);
         std::cout << voxel[0] << " " << voxel[1] << std::endl;
         auto end_parallel = std::chrono::high_resolution_clock::now();
@@ -251,48 +444,16 @@ void DrawGLScene()
 
         std::cout << "Checksum: " << checksum << std::endl;
 
-        if (print_counter < 55) // do it for few first frames as first tend to be broken (RGB)
+        if (frame_counter > 0)
         {
-            print_counter++;
-        }
-        if (print_counter == 54)
-        {
-            // Open a file to write output
-            std::ofstream outfile("output.txt");
-
-            // Check if the file is open
-            if (!outfile.is_open())
-            {
-                std::cerr << "Error opening file!" << std::endl;
-                throw;
-            }
-
-            // Writing rgb vector in initialization list format to file
-            outfile << "rgb = { ";
-            for (size_t i = 0; i < rgb.size(); ++i)
-            {
-                outfile << (int)rgb[i]; // Casting to int to print as numbers
-                if (i != rgb.size() - 1)
-                    outfile << ", ";
-            }
-            outfile << " }" << std::endl;
-
-            // Writing depth vector in initialization list format to file
-            outfile << "depth = { ";
-            for (size_t i = 0; i < depth.size(); ++i)
-            {
-                outfile << (int)depth[i];
-                if (i != depth.size() - 1)
-                    outfile << ", ";
-            }
-            outfile << " }" << std::endl;
-
-            // Close the file
-            outfile.close();
         }
 
 #ifdef USE_FILE
-        device->next_frame();
+        const bool ret = device->next_frame();
+        if (ret == false)
+        {
+            stop = true;
+        }
 #endif
     }
 
@@ -306,11 +467,11 @@ void DrawGLScene()
         glColor3ub(255, 255, 255);
     for (int i = 0; i < 480 * 640; ++i)
     {
-        cv::Vec3f vertex = frame_data.vertex_levels[0].at<cv::Vec3f>(i / 640, i % 640);
+        cv::Vec3f vertex = current_frame_data.vertex_levels[0].at<cv::Vec3f>(i / 640, i % 640);
         if (color)
-            glColor3ub(rgb[3 * i + 0],  // R
-                       rgb[3 * i + 1],  // G
-                       rgb[3 * i + 2]); // B
+            glColor3ub(current_frame_data.color_levels[0][3 * i + 0],  // R
+                       current_frame_data.color_levels[0][3 * i + 1],  // G
+                       current_frame_data.color_levels[0][3 * i + 2]); // B
 
         // Convert from image plane coordinates to world coordinates
         glVertex3f(vertex[0], vertex[1], vertex[2]);
@@ -357,9 +518,9 @@ int main(int argc, char **argv)
 {
 
     current_pose.setIdentity();
-    current_pose(0, 3) = 512 / 2 * 2.0f;
-    current_pose(1, 3) = 512 / 2 * 2.0f;
-    current_pose(2, 3) = 512 / 2 * 2.0f - 200.0f;
+    current_pose(0, 3) = kf::voxel_grid_size / 2 * kf::voxel_size;
+    current_pose(1, 3) = kf::voxel_grid_size / 2 * kf::voxel_size;
+    current_pose(2, 3) = kf::voxel_grid_size / 2 * kf::voxel_size - kf::voxel_grid_size;
 
 #ifndef USE_FILE
     device = &freenect.createDevice<kf::KinectFrameGetter>(0);
@@ -367,8 +528,8 @@ int main(int argc, char **argv)
     device->startVideo();
     device->startDepth();
 #else
-    device = new kf::FileFrameGetter("../data/rgbd_dataset_freiburg1_xyz/rgb.txt",
-                                     "../data/rgbd_dataset_freiburg1_xyz/depth.txt");
+    device = new kf::FileFrameGetter("../data/rgbd_dataset_freiburg1_xyz/rgb_short.txt",
+                                     "../data/rgbd_dataset_freiburg1_xyz/depth_short.txt");
 #endif
 
     glutInit(&argc, argv);
