@@ -330,7 +330,7 @@ void surface_reconstruction(VolumeData &volume, const std::vector<uint16_t> &dep
 
 } // namespace kf
 
-// #define USE_FILE
+#define USE_FILE
 
 #ifndef USE_FILE
 Freenect::Freenect freenect;
