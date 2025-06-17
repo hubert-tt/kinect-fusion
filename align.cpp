@@ -1,7 +1,12 @@
+#include <cassert>
 #include <chrono>
+#include <eigen3/Eigen/Eigen>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <opencv2/core.hpp>
+#include <opencv2/core/eigen.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/rgbd.hpp>
@@ -10,6 +15,8 @@
 #include <pcl/io/ply_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -137,6 +144,56 @@ class VoxelGrid
     std::mutex lock_;
 };
 
+class TrajectoryRecorder
+{
+  public:
+    TrajectoryRecorder()
+    {
+        using namespace std::chrono;
+
+        // Start timestamp
+        auto now = system_clock::now();
+        auto duration = now.time_since_epoch();
+        auto secs = duration_cast<seconds>(duration).count();
+        auto usecs = duration_cast<microseconds>(duration).count() % 1000000;
+        start_timestamp = secs + usecs / 1e6;
+
+        std::ostringstream filename_ss;
+        filename_ss << "trajectory_" << std::fixed << std::setprecision(6) << start_timestamp << ".traj";
+        filename = filename_ss.str();
+
+        trajectory_txt.open(filename, std::ios::out);
+        trajectory_txt << "# trajectory\n";
+        trajectory_txt << "# file: '" << filename << "'\n";
+        trajectory_txt << "# timestamp tx ty tz qx qy qz qw\n";
+    }
+
+    ~TrajectoryRecorder()
+    {
+        trajectory_txt.close();
+    }
+
+    void save_pose(const cv::Mat &pose_4x4, double timestamp)
+    {
+        assert(pose_4x4.rows == 4 && pose_4x4.cols == 4 && pose_4x4.type() == CV_64FC1);
+
+        Eigen::Matrix4d eigen_mat;
+        cv::cv2eigen(pose_4x4, eigen_mat);
+
+        Eigen::Matrix3d rotation = eigen_mat.block<3, 3>(0, 0);
+        Eigen::Quaterniond q(rotation);
+        Eigen::Vector3d t = eigen_mat.block<3, 1>(0, 3);
+
+        trajectory_txt << std::fixed << std::setprecision(6) << timestamp << " " << t.x() << " " << t.y() << " "
+                       << t.z() << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+    }
+
+  private:
+    std::string filename;
+    std::ofstream trajectory_txt;
+    double start_timestamp;
+};
+
 } // namespace kf
 
 int main(int argc, char **argv)
@@ -147,6 +204,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    kf::TrajectoryRecorder recorder;
     kf::FileFrameGetter getter(argv[1], argv[2]);
     // fx = 517.3f; fy = 516.5f; cx = 318.6f; cy = 255.3f;
     // cv::Mat K = (cv::Mat_<float>(3, 3) << 517.3f, 0.0f, 318.6f, 0.0f, 516.5f, 255.3f, 0.0f, 0.0f, 1.0f);
@@ -170,6 +228,7 @@ int main(int argc, char **argv)
     // minGradMagnitudes[3] = 1;
 
     auto odom = cv::rgbd::RgbdICPOdometry::create(K);
+    // auto odom = cv::rgbd::FastICPOdometry::create(K);
 
     odom->setCameraMatrix(K);
 
@@ -188,7 +247,8 @@ int main(int argc, char **argv)
     const double space_sigma = 4.5;
 
     cv::Mat rgb_prev, depth_prev;
-    if (!getter.get_rgb(rgb_buf) || !getter.get_depth(depth_buf))
+    double timestamp_to_save_traj;
+    if (!getter.get_rgb(rgb_buf) || !getter.get_depth(depth_buf) || !getter.get_timestamp(timestamp_to_save_traj))
     {
         std::cerr << "Failed to load first frame" << std::endl;
         return 1;
@@ -216,12 +276,15 @@ int main(int argc, char **argv)
     Rt_total.at<double>(1, 3) = -offset * 0.3f; // up / down
     Rt_total.at<double>(2, 3) = offset;
 
+    cv::Mat Rt_to_save = cv::Mat::eye(4, 4, CV_64FC1);
+    recorder.save_pose(Rt_to_save, timestamp_to_save_traj);
+
     int counter = 0;
     std::vector<cv::Mat> clouds;
 
     while (getter.next_frame())
     {
-        if (!getter.get_rgb(rgb_buf) || !getter.get_depth(depth_buf))
+        if (!getter.get_rgb(rgb_buf) || !getter.get_depth(depth_buf) || !getter.get_timestamp(timestamp_to_save_traj))
         {
             break;
         }
@@ -255,6 +318,10 @@ int main(int argc, char **argv)
         }
 
         Rt_total = Rt * Rt_total;
+
+        Rt_to_save = Rt * Rt_to_save;
+
+        recorder.save_pose(Rt_to_save, timestamp_to_save_traj);
 
         // std::cout << "Rt_total = " << std::endl << " " << Rt_total << std::endl;
 

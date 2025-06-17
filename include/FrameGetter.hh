@@ -25,6 +25,8 @@ class FileFrameGetter : public FrameGetter
 
     bool get_depth(std::vector<uint16_t> &buffer) override;
 
+    bool get_timestamp(double &timestamp);
+
     bool next_frame();
 
   private:

@@ -47,6 +47,32 @@ bool FileFrameGetter::get_rgb(std::vector<uint8_t> &buffer)
     return true;
 }
 
+bool FileFrameGetter::get_timestamp(double &timestamp)
+{
+    if (current_index >= rgb_files.size())
+        return false;
+
+    const std::string &filepath = rgb_files[current_index];
+
+    // Find the last '/' and last '.'
+    size_t lastSlash = filepath.find_last_of('/');
+    size_t lastDot = filepath.find_last_of('.');
+
+    if (lastSlash == std::string::npos || lastDot == std::string::npos || lastDot <= lastSlash + 1)
+        return false;
+
+    std::string timestampStr = filepath.substr(lastSlash + 1, lastDot - lastSlash - 1);
+
+    try {
+        timestamp = std::stod(timestampStr);
+    } catch (const std::exception &e) {
+        std::cerr << "Failed to convert timestamp: " << timestampStr << " - " << e.what() << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 bool FileFrameGetter::get_depth(std::vector<uint16_t> &buffer)
 
 {

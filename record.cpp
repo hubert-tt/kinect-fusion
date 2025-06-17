@@ -115,12 +115,14 @@ class Recorder
 Freenect::Freenect freenect;
 kf::KinectFrameGetter *device;
 kf::Recorder recorder("recorded_files");
+kf::Recorder recorder_images("images");
 
 int window(0);                // Glut window identifier
 int mx = -1, my = -1;         // Prevous mouse coordinates
 float anglex = 0, angley = 0; // Panning angles
 float zoom = 1;               // Zoom factor
 bool color = true;            // Flag to indicate to use of color in the cloud
+bool snapshot = true;
 // uint8_t print_counter = 0;
 
 void DrawGLScene()
@@ -141,6 +143,12 @@ void DrawGLScene()
     glBegin(GL_POINTS);
 
     recorder.save_frame(rgb, depth, 640, 480);
+
+    if (snapshot)
+    {
+        recorder_images.save_frame(rgb, depth, 640, 480);
+        snapshot = false;
+    }
 
     if (!color)
         glColor3ub(255, 255, 255);
@@ -241,7 +249,7 @@ int main(int argc, char **argv)
     return 0;
 }
 
-void keyPressed(unsigned char key, int x, int y)
+void keyPressed(unsigned char key, int qualityx, int y)
 {
     switch (key)
     {
@@ -259,6 +267,11 @@ void keyPressed(unsigned char key, int x, int y)
         device->stopVideo();
 #endif
         exit(0);
+
+    case 'r':
+    case 'R':
+        snapshot = true;
+        break;
     }
 }
 
@@ -323,5 +336,6 @@ void printInfo()
     std::cout << "Rotate       :   Mouse Left Button" << std::endl;
     std::cout << "Zoom         :   Mouse Wheel" << std::endl;
     std::cout << "Toggle Color :   C" << std::endl;
-    std::cout << "Quit         :   Q or Esc\n" << std::endl;
+    std::cout << "Quit         :   Q or Esc" << std::endl;
+    std::cout << "Snapshot     :   R\n" << std::endl;
 }

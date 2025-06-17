@@ -73,6 +73,13 @@ int main(int argc, char **argv)
 
     cout << "loaded" << endl;
 
+    for (auto &pt : cloud->points)
+    {
+        pt.x *= 1000.0f;
+        pt.y *= 1000.0f;
+        pt.z *= 1000.0f;
+    }
+
     StatisticalOutlierRemoval<PointXYZRGB> sor;
     sor.setInputCloud(cloud);
     sor.setMeanK(50);
@@ -83,7 +90,7 @@ int main(int argc, char **argv)
     NormalEstimationOMP<PointXYZRGB, Normal> ne;
     ne.setNumberOfThreads(10);
     ne.setInputCloud(cloud_filtered);
-    ne.setRadiusSearch(0.01);
+    ne.setRadiusSearch(0.02f * 1000.0f);
     Eigen::Vector4f centroid;
     compute3DCentroid(*cloud_filtered, centroid);
     ne.setViewPoint(centroid[0], centroid[1], centroid[2]);
@@ -115,8 +122,8 @@ int main(int argc, char **argv)
         GridProjection<PointXYZRGBNormal> gp;
         gp.setInputCloud(cloud_smoothed_normals);
         gp.setSearchMethod(tree);
-        gp.setResolution(0.005);
-        gp.setPaddingSize(3);
+        gp.setResolution(0.002);
+        gp.setPaddingSize(5);
         gp.setNearestNeighborNum(100);
         gp.setMaxBinarySearchLevel(10);
         gp.reconstruct(mesh);
