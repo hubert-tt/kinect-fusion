@@ -114,7 +114,7 @@ class VoxelGrid
                     if (v.color_[0] >= white_threshold && v.color_[1] >= white_threshold &&
                         v.color_[2] >= white_threshold)
                     {
-                        // continue;
+                        continue;
                     }
 
                     pcl::PointXYZRGB p;
@@ -235,8 +235,8 @@ int main(int argc, char **argv)
     // odom->setMaxRotation(30);
     // odom->setMaxTranslation(0.05);
 
-    const int size = 200;
-    const float voxel_size = 0.005f; // in meters
+    const int size = 110;
+    const float voxel_size = 0.01f; // in meters
     const uint16_t noise_cutoff = 10;
     kf::VoxelGrid grid(size, voxel_size, noise_cutoff);
 
